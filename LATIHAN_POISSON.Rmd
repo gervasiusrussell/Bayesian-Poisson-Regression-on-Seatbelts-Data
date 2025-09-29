@@ -1,0 +1,146 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+set.seed(123)
+data("Seatbelts")
+# Seatbelts
+```
+
+```{r}
+library(rjags)
+```
+
+```{r}
+X <- as.matrix(subset(Seatbelts, select = -VanKilled))
+y <- as.numeric(subset(Seatbelts, select = VanKilled))
+N = nrow(X)
+col = ncol(X)
+```
+
+```{r}
+model_str <- "
+  model{
+    for (i in 1:N){
+      Y[i] ~ dpois(lambda[i])
+      log(lambda[i]) <- beta_0 + inprod(beta[], x[i, ])
+      # Log-likelihood contribution for WAIC
+      like[i] <- Y[i] * log(lambda[i]) - lambda[i] - logfact(Y[i])
+    }
+    
+    beta_0 ~ dnorm(0,1e6)
+    for (i in 1:col){
+      beta[i] ~ dnorm(0, 1e6)
+    }
+  }
+"
+```
+
+```{r}
+data_list <- list(
+  x = X,
+  Y = y,
+  N = N,
+  col = col
+)
+```
+
+
+```{r}
+pois_model <- jags.model(
+  textConnection(model_str),
+  data = data_list,
+  n.chains = 5
+)
+update(pois_model, n.iter = 1000, progress.bar = "none")
+
+```
+
+```{r}
+samples <- coda.samples(
+  model = pois_model,
+  variable.names = c("beta", "beta_0",'like'),
+  n.iter = 1e3
+)
+```
+
+```{r}
+p <- ncol(X)
+summary(samples[,1:p])
+par(mar=c(2,2,2,2))
+plot(samples[,1:p])
+```
+
+```{r}
+for(i in 1:5){
+  cat("Chain", i)
+  print(geweke.diag(samples[[i]][,1:p]))
+}
+```
+
+```{r}
+gelman.diag(samples[,1:p])
+```
+
+
+```{r}
+effectiveSize(samples[,1:p])
+```
+
+
+```{r}
+dic.samples(pois_model,
+            n.iter = 1000,
+            n.thin = 5,
+            progress.bar = "none")
+```
+
+```{r}
+# Extract log-likelihood samples
+like_samples <- as.matrix(samps)[, grep("^like", colnames(as.matrix(samps)))]
+
+# Step 1: Compute pointwise log-likelihood
+lppd <- sum(log(rowMeans(exp(like_samples))))
+
+# Step 2: Compute penalty (variance of log-likelihood)
+p_waic <- sum(apply(like_samples, 2, var))
+
+# Step 3: Calculate WAIC
+waic <- -2 * (lppd - p_waic)
+
+cat("WAIC:", waic, "\n")
+
+```
+
+```{r}
+new_samps <- as.matrix(samples)
+beta_0_samps <- new_samps[, "beta_0"]
+beta_samps <- new_samps[, grep("beta\\[", colnames(new_samps))]
+```
+
+```{r}
+pred_lambda <- matrix(NA, nrow = nrow(beta_samps), ncol = nrow(X))
+
+for (i in 1:nrow(beta_samps)){
+  pred_lambda[i, ] <- exp(beta_0_samps[i] + X %*% beta_samps[i, ])
+}
+```
+
+```{r}
+pred_y <- matrix(NA, nrow = nrow(beta_samps), ncol=nrow(X))
+
+for(i in 1: nrow(beta_samps)){
+  for(j in 1:nrow(X)){
+    pred_y[i,j] <- rpois(1, pred_lambda[i,j])
+  }
+}
+```
+
+```{r}
+pred_mean <- apply(pred_y, 2, mean)
+
+mean(pred_mean >= y)
+```
+
